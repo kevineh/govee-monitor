@@ -23,6 +23,18 @@ starts directly at byte 0. We defensively strip it again if a backend left
 it in place.
 
 0xFFFF means the slot has no probe connected / no value set.
+
+Newer H5055 firmware broadcasts a different 20-byte payload under
+manufacturer ID 0x0070 (big-endian, values in hundredths of a degree):
+
+    battery           mfg[5] & 0x7F
+    channel byte      mfg[6]  (payload_index / connection_mask as above)
+    A-slot value      mfg[8:10]  big-endian /100   (0xFFFF = no probe)
+    A-slot low alarm  mfg[10:12]
+    A-slot high alarm mfg[12:14]
+    B-slot value      mfg[14:16]
+    B-slot low alarm  mfg[16:18]
+    B-slot high alarm mfg[18:20]
 """
 
 from __future__ import annotations
@@ -30,9 +42,11 @@ from __future__ import annotations
 import dataclasses
 
 GOVEE_MFG_ID = 0xEC88
+H5055_MFG_ID = 0x0070
 MAC_PREFIX = "a4:c1:38"
 DISCONNECTED = 0xFFFF
 MAX_TEMP = 300  # raw integer °C reading; above this (and != 0xFFFF) is suspect
+MAX_TEMP_RAW_NEW = 30000  # new format: raw hundredths of a degree (300.00 °C)
 
 
 class DecodeError(ValueError):
@@ -73,6 +87,11 @@ def _strip_company_id(mfg: bytes) -> bytes:
 def _read_u16(mfg: bytes, low: int, high: int) -> int:
     """Little-endian u16 from two byte positions (mirrors the repo's swap)."""
     return mfg[low] | (mfg[high] << 8)
+
+
+def _read_u16_be(mfg: bytes, lo: int, hi: int) -> int:
+    """Big-endian u16 from two byte positions (new-firmware format)."""
+    return (mfg[lo] << 8) | mfg[hi]
 
 
 def _check_range(value: int, name: str) -> None:
@@ -131,3 +150,73 @@ def decode_payload(mfg_bytes: bytes) -> DecodedPayload:
         channel_a=channel_a,
         channel_b=channel_b,
     )
+
+
+def _new_reading(value_raw: int, low_raw: int, high_raw: int) -> ChannelReading:
+    """New-format slot: big-endian raw values, temperature in hundredths of °C."""
+    if value_raw != DISCONNECTED and not 0 <= value_raw <= MAX_TEMP_RAW_NEW:
+        raise DecodeError(
+            f"temperature {value_raw} out of range 0..{MAX_TEMP_RAW_NEW} or 0xFFFF"
+        )
+    return ChannelReading(
+        value=None if value_raw == DISCONNECTED else value_raw / 100.0,
+        low_alarm=None if low_raw == DISCONNECTED else low_raw,
+        high_alarm=None if high_raw == DISCONNECTED else high_raw,
+    )
+
+
+def decode_payload_new(mfg_bytes: bytes) -> DecodedPayload:
+    """Decode a 20-byte new-firmware H5055 manufacturer-data payload (mfg 0x0070).
+
+    The byte layout is documented at the top of this module. Values are
+    big-endian and temperatures are already scaled to °C (raw / 100), so no
+    ``--temp-divisor`` is needed for this format.
+    """
+    mfg = _strip_company_id(mfg_bytes)
+    if len(mfg) != 20:
+        raise DecodeError(f"new-format payload must be 20 bytes, got {len(mfg)}")
+
+    battery = mfg[5] & 0x7F
+    if battery > 100:
+        raise DecodeError(f"battery {battery} out of range 0..100")
+
+    channel_byte = mfg[6]
+    payload_index = (channel_byte >> 6) & 0x03
+    if payload_index > 2:
+        raise DecodeError(f"payload_index {payload_index} out of range 0..2")
+    base_channel = 2 * payload_index + 1
+    connection_mask = channel_byte & 0x3F
+
+    channel_a = _new_reading(
+        _read_u16_be(mfg, 8, 9),
+        _read_u16_be(mfg, 10, 11),
+        _read_u16_be(mfg, 12, 13),
+    )
+    channel_b = _new_reading(
+        _read_u16_be(mfg, 14, 15),
+        _read_u16_be(mfg, 16, 17),
+        _read_u16_be(mfg, 18, 19),
+    )
+
+    return DecodedPayload(
+        battery=battery,
+        payload_index=payload_index,
+        base_channel=base_channel,
+        connection_mask=connection_mask,
+        channel_a=channel_a,
+        channel_b=channel_b,
+    )
+
+
+def decode_advertisement(mfg_data: dict[int, bytes]) -> DecodedPayload | None:
+    """Decode the first recognizable Govee H5055 payload in ``mfg_data``.
+
+    Old firmware uses manufacturer ID ``0xEC88``; new firmware uses ``0x0070``.
+    Returns ``None`` when neither key is present (not an H5055, ignore
+    silently).
+    """
+    if GOVEE_MFG_ID in mfg_data:
+        return decode_payload(mfg_data[GOVEE_MFG_ID])
+    if H5055_MFG_ID in mfg_data:
+        return decode_payload_new(mfg_data[H5055_MFG_ID])
+    return None

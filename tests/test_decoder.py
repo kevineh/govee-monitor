@@ -5,14 +5,23 @@ import pytest
 from govee_monitor.decoder import (
     DISCONNECTED,
     GOVEE_MFG_ID,
+    H5055_MFG_ID,
     MAC_PREFIX,
     DecodeError,
+    decode_advertisement,
     decode_payload,
+    decode_payload_new,
 )
 
-# Known good frames from the reference repo.
+# Known good frames from the reference repo (old firmware, mfg 0xEC88).
 SAMPLE_A = bytes.fromhex("cf040400464906ffffffff2c01061700ffff2c010000")
 SAMPLE_B = bytes.fromhex("cf0404003b0806ffffffff2c0106ffffffff2c010000")
+
+# Real captures from a new-firmware H5055 (mfg 0x0070, 20 bytes, big-endian).
+# 25.00°C on sensor 1, battery 100, probe plugged into port 1.
+NEW_FRAME_1 = bytes.fromhex("8341000101e4010009c4ffffffffffffffffffff")
+# Same device, payload_index 2 (sensors 5/6), both slots empty.
+NEW_FRAME_2 = bytes.fromhex("8341000101e48100ffffffffffffffffffffffff")
 
 
 def test_sample_a_decodes_as_documented():
@@ -85,4 +94,48 @@ def test_too_short_payload_raises():
 
 def test_constants_match_spec():
     assert GOVEE_MFG_ID == 0xEC88
+    assert H5055_MFG_ID == 0x0070
     assert MAC_PREFIX == "a4:c1:38"
+
+
+def test_new_frame_1_decodes_as_documented():
+    d = decode_payload_new(NEW_FRAME_1)
+    assert d.battery == 100  # mfg[5]=0xE4, top bit is a flag -> & 0x7F
+    assert d.payload_index == 0
+    assert d.base_channel == 1
+    assert d.connection_mask == 0b000001  # sensor 1 plugged in
+    assert d.connected_channels == (1,)
+
+    # 0x09C4 big-endian == 2500 == 25.00°C.
+    assert d.channel_a.value == 25.0
+    assert d.channel_a.low_alarm is None
+    assert d.channel_a.high_alarm is None
+
+    # B slot empty (0xFFFF) -> None across the board.
+    assert d.channel_b.value is None
+    assert d.channel_b.low_alarm is None
+    assert d.channel_b.high_alarm is None
+
+
+def test_new_frame_2_decodes_as_documented():
+    d = decode_payload_new(NEW_FRAME_2)
+    assert d.battery == 100
+    assert d.payload_index == 2
+    assert d.base_channel == 5
+    assert d.channel_a.value is None
+    assert d.channel_b.value is None
+
+
+def test_decode_advertisement_dispatches():
+    # New firmware key -> new decoder.
+    d_new = decode_advertisement({H5055_MFG_ID: NEW_FRAME_1})
+    assert d_new is not None
+    assert d_new.channel_a.value == 25.0
+
+    # Old firmware key -> old decoder.
+    d_old = decode_advertisement({GOVEE_MFG_ID: SAMPLE_A})
+    assert d_old is not None
+    assert d_old.battery == 70
+
+    # Neither key -> not an H5055, silently ignored.
+    assert decode_advertisement({}) is None

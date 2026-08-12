@@ -14,9 +14,11 @@ import time
 from .decoder import (
     DISCONNECTED,
     GOVEE_MFG_ID,
+    H5055_MFG_ID,
     ChannelReading,
     DecodeError,
     DecodedPayload,
+    decode_advertisement,
     decode_payload,
 )
 from .state import DeviceState
@@ -62,15 +64,18 @@ class H5055Scanner:
     def _on_detect(self, device, advertisement) -> None:
         if not self._matches(device.address):
             return
-        mfg = advertisement.manufacturer_data.get(GOVEE_MFG_ID)
-        if mfg is None:
-            return
         try:
-            payload = decode_payload(mfg)
+            payload = decode_advertisement(advertisement.manufacturer_data)
         except DecodeError as exc:
+            mfg = b"".join(
+                advertisement.manufacturer_data.get(key, b"")
+                for key in (GOVEE_MFG_ID, H5055_MFG_ID)
+            )
             log.warning(
                 "decode error from %s: %s (mfg=%s)", device.address, exc, mfg.hex()
             )
+            return
+        if payload is None:
             return
         self.state.update(payload, advertisement.rssi, time.monotonic())
 
@@ -137,11 +142,8 @@ async def list_h5055(
                 return
         elif not addr.startswith(mac_prefix):
             return
-        mfg = advertisement.manufacturer_data.get(GOVEE_MFG_ID)
-        if mfg is None:
-            return
         try:
-            payload = decode_payload(mfg)
+            payload = decode_advertisement(advertisement.manufacturer_data)
         except DecodeError as exc:
             found[addr] = {
                 "name": device.name,
@@ -152,6 +154,8 @@ async def list_h5055(
                 "channels": None,
                 "note": f"decode error: {exc}",
             }
+            return
+        if payload is None:
             return
         found[addr] = {
             "name": device.name,

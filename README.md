@@ -118,9 +118,27 @@ SIGINT/Ctrl+C 时 flush 当前文件。JSONL 宽格式一行一个快照：
 `0xFFFF` = 该槽未接探针 / 未设值。每个广告只携带一对传感器槽位，扫描器跨
 3 种 payload 聚合出完整 6 通道。
 
+### 新固件（mfg `0x0070`，20 字节，大端，值已内置 `/100`）
+
+较新固件的 H5055 改广播 manufacturer data（mfg 键 `0x0070`，service
+`00005550-…`），20 字节、**大端**、温度原始值除以 100 才是 °C —— 解码器已
+内置 `/100`，**无需 `--temp-divisor`**。
+
+| 偏移(字节) | 含义 |
+| --- | --- |
+| 5 | 电池电量（`& 0x7F`，最高位是标志位，0–100） |
+| 6 | 通道字节：`payload_index=(b>>6)&3`、`connection_mask=b&0x3F` |
+| 8–9 | A 槽值（传感器 `base=2*payload_index+1`，大端 `/100`） |
+| 10–11 / 12–13 | A 槽 low / high 报警阈值（大端） |
+| 14–15 | B 槽值（传感器 `base+1`，大端 `/100`） |
+| 16–17 / 18–19 | B 槽 low / high 报警阈值（大端） |
+
+同样 `0xFFFF` = 未接探针 / 未设值。扫描器会同时识别 `0xEC88`（旧）与 `0x0070`
+（新）两种格式。
+
 ## 真机首测清单
 
-1. `uv run python -m govee_monitor --list` 确认 MAC 出现（前缀 `a4:c1:38`）。
+1. `uv run python -m govee_monitor --list` 确认 MAC 出现（前缀 `a4:c1:38`；新固件 mfg `0x0070` 也能被发现）。
 2. 插豆温 / 排气探针，看 mask 的 bit(n-1) 是否对应该传感器号。
 3. 据此设 `--bt-channel` / `--et-channel`（默认 4 / 6）。
 4. 开 Artisan，配好 Web Sockets，看到曲线即可。
@@ -128,7 +146,8 @@ SIGINT/Ctrl+C 时 flush 当前文件。JSONL 宽格式一行一个快照：
 ## 量程交叉核对（`--temp-divisor`）
 
 原始值像整数 °C（室温 23）。若实际读数约为预期的 10 倍，说明固件是 0.1° 分辨率，
-加 `--temp-divisor 10`。
+加 `--temp-divisor 10`。新固件（mfg `0x0070`）的 `/100` 已在解码器内完成，
+无需该参数。
 
 ## Windows 注意事项
 
