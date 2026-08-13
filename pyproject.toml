@@ -2,7 +2,7 @@
 name = "govee-monitor"
 version = "0.1.0"
 description = "Govee H5055 BLE -> Artisan coffee-roasting temperature bridge for native Windows Python"
-readme = "README.md"
+readme = "README.md"  # English; 中文见 README.zh-CN.md
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [

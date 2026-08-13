@@ -10,3 +10,12 @@ dist/
 
 # Test / tooling cache
 .pytest_cache/
+
+# Runtime log files
+logs/
+
+# Local agent memory (not part of the project)
+memory/
+
+# Claude Code local config
+.claude/
