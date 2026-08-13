@@ -85,17 +85,3 @@ async def test_keepalive_echoes_id_with_empty_data():
             assert json.loads(raw) == {"id": 99, "data": {}}
     finally:
         await server.stop()
-
-
-@pytest.mark.asyncio
-async def test_broadcast_charge_reaches_client():
-    state = DeviceState()
-    server, uri = await _start_server(state)
-    try:
-        async with websockets.connect(uri) as ws:
-            await asyncio.sleep(0.05)  # let the server register the connection
-            await server.broadcast({"Message": "CHARGE"})
-            raw = await asyncio.wait_for(ws.recv(), timeout=5)
-            assert json.loads(raw) == {"Message": "CHARGE"}
-    finally:
-        await server.stop()

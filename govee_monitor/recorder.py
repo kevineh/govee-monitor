@@ -1,9 +1,8 @@
-"""JSONL/CSV recording with roast-file rotation (CHARGE -> DROP).
+"""JSONL/CSV recording of temperature snapshots.
 
-Recording only happens between a CHARGE event (opens a fresh
-``roast_<start_iso>.<ext>`` file) and a DROP event (writes the drop line and
-closes it). Regular snapshots are written every ``interval`` seconds. A
-SIGINT/KeyboardInterrupt flushes and closes the current file.
+A single log file is opened when the recorder starts and written to
+continuously until the process exits. Snapshots are written every
+``interval`` seconds. On shutdown the current file is flushed and closed.
 """
 
 from __future__ import annotations
@@ -45,53 +44,34 @@ class Recorder:
         self._csv_writer: Any | None = None
         self._start_iso: str | None = None
 
-    def start_roast(self, event: str = "CHARGE") -> None:
-        """Open a new roast file for this charge and write the event line."""
-        self.end_roast()  # close any previous roast first
+    def start(self) -> None:
+        """Open a new log file for this run."""
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self._start_iso = _safe_iso()
         self._csv_writer = None
         ext = "jsonl" if self.log_format == "jsonl" else "csv"
         path = self.out_dir / f"roast_{self._start_iso}.{ext}"
         self._fh = path.open("w", encoding="utf-8", newline="")
-        log.info("started roast file %s", path)
-        self.write_event(event)
-
-    def end_roast(self, event: str = "DROP") -> None:
-        """Write the drop event line, then flush and close the file."""
-        if self._fh is None:
-            return
-        self.write_event(event)
-        self._fh.flush()
-        self._fh.close()
-        self._fh = None
-        self._csv_writer = None
-        log.info("closed roast file %s", self._start_iso)
-
-    def write_event(self, event: str) -> None:
-        if self._fh is None:
-            return
-        self._write_row(self._row_dict(None, event))
+        log.info("started log file %s", path)
 
     def snapshot(self, state: DeviceState) -> None:
         if self._fh is None:
             return
-        self._write_row(self._row_dict(state, ""))
+        self._write_row(self._row_dict(state))
 
-    def _row_dict(self, state: DeviceState | None, event: str) -> dict:
+    def _row_dict(self, state: DeviceState) -> dict:
         row = {
             "t_iso": _iso_now(),
             "t_epoch": round(time.time(), 3),
-            "battery": state.battery if state else None,
-            "rssi": state.rssi if state else None,
-            "event": event,
+            "battery": state.battery,
+            "rssi": state.rssi,
         }
         if self.log_format == "channels":
             for ch in range(1, 7):
-                row[f"ch{ch}"] = state.channels.get(ch) if state else None
+                row[f"ch{ch}"] = state.channels.get(ch)
             return row
-        row["BT"] = state.bt if state else None
-        row["ET"] = state.et if state else None
+        row["BT"] = state.bt
+        row["ET"] = state.et
         return row
 
     def _columns(self) -> list[str]:
@@ -107,18 +87,19 @@ class Recorder:
                 "ch6",
                 "battery",
                 "rssi",
-                "event",
             ]
-        return ["t_iso", "t_epoch", "BT", "ET", "battery", "rssi", "event"]
+        return ["t_iso", "t_epoch", "BT", "ET", "battery", "rssi"]
 
     def _write_row(self, row: dict) -> None:
         if self.log_format == "jsonl":
             self._fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-            return
-        if self._csv_writer is None:
-            self._csv_writer = csv.DictWriter(self._fh, fieldnames=self._columns())
-            self._csv_writer.writeheader()
-        self._csv_writer.writerow(row)
+        else:
+            if self._csv_writer is None:
+                self._csv_writer = csv.DictWriter(self._fh, fieldnames=self._columns())
+                self._csv_writer.writeheader()
+            self._csv_writer.writerow(row)
+        # Flush each row so a hard kill / crash doesn't lose buffered data.
+        self._fh.flush()
 
     async def run(self, state: DeviceState) -> None:
         """Snapshot loop; runs until cancelled."""

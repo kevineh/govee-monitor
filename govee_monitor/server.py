@@ -2,8 +2,7 @@
 
 Artisan acts as the WebSocket *client*; this module is the server. The
 protocol is request/response: a request carries ``command`` and ``id``, and
-the response must echo the ``id``. Data is pushed as
-``{"Message": "CHARGE"}`` / ``{"Message": "DROP"}``.
+the response must echo the ``id``.
 
 Artisan's Web Sockets tab defaults to a single ``getData`` request, so one
 round-trip returns both BT and ET. Unknown commands (e.g.
@@ -35,7 +34,6 @@ class DataServer:
         self.state = state
         self.node_bt = node_bt
         self.node_et = node_et
-        self._connections: set[Any] = set()
         self._ws_server: Any = None
 
     @property
@@ -55,14 +53,11 @@ class DataServer:
             self._ws_server = None
 
     async def _handler(self, ws: Any) -> None:
-        self._connections.add(ws)
         try:
             async for raw in ws:
                 await self._on_message(ws, raw)
         except websockets.ConnectionClosed:
             pass
-        finally:
-            self._connections.discard(ws)
 
     async def _on_message(self, ws: Any, raw: str) -> None:
         try:
@@ -88,13 +83,3 @@ class DataServer:
         else:
             response = {"id": rid, "data": {}}
         await ws.send(json.dumps(response))
-
-    async def broadcast(self, message: dict) -> None:
-        """Push a message (e.g. ``{"Message": "CHARGE"}``) to all clients."""
-        if not self._connections:
-            return
-        payload = json.dumps(message)
-        await asyncio.gather(
-            *(conn.send(payload) for conn in list(self._connections)),
-            return_exceptions=True,
-        )

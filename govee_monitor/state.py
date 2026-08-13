@@ -1,7 +1,7 @@
 """Shared in-memory device state read by every component.
 
-Single source of truth. Components (scanner/sim, server, recorder, events)
-never talk to each other directly -- they only read/write this object.
+Single source of truth. Components (scanner/sim, server, recorder) never
+talk to each other directly -- they only read/write this object.
 """
 
 from __future__ import annotations

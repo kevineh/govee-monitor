@@ -4,7 +4,6 @@ Single process, single asyncio event loop, three concurrent pieces:
     BLE scanner / simulator  ->  DeviceState
                                    |-> websockets server (Artisan)
                                    |-> recorder (local JSONL/CSV)
-                                   |-> events (keyboard / auto-charge / control file)
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import asyncio
 import logging
 
 from . import __version__
-from .events import CHARGE, DROP, AutoChargeSource, FileSource, KeyboardSource
 from .recorder import Recorder
 from .scanner import H5055Scanner, SimSource, list_h5055
 from .server import DataServer
@@ -55,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--node-et", default="ET", help="Artisan node name for exhaust temp (default ET)")
 
     p.add_argument("--interval", type=float, default=2.0, help="recording interval in seconds (default 2)")
-    p.add_argument("--out", default="./logs", help="output directory for roast logs (default ./logs)")
+    p.add_argument("--out", default="./logs", help="output directory for log files (default ./logs)")
     p.add_argument(
         "--log-format",
         choices=["jsonl", "csv", "channels"],
@@ -84,18 +82,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--sim", action="store_true", help="synthetic payloads, no BLE needed")
     p.add_argument("--list", action="store_true", help="scan ~5s and list discovered H5055 devices")
-
-    p.add_argument(
-        "--auto-charge-temp",
-        type=float,
-        default=None,
-        help="auto-send CHARGE when BT first reaches this temperature",
-    )
-    p.add_argument(
-        "--control-file",
-        default=None,
-        help="optional file; writing CHARGE/DROP into it triggers events",
-    )
 
     p.add_argument("-v", "--verbose", action="count", default=0)
     return p
@@ -145,31 +131,6 @@ async def _run(args: argparse.Namespace) -> None:
     server = DataServer(state, node_bt=args.node_bt, node_et=args.node_et)
     recorder = Recorder(args.out, args.interval, args.log_format)
 
-    auto_charge: AutoChargeSource | None = None
-
-    async def on_event(evt: str) -> None:
-        log.info("event: %s", evt)
-        if evt == CHARGE:
-            recorder.start_roast(CHARGE)
-        elif evt == DROP:
-            recorder.end_roast(DROP)
-            if auto_charge is not None:
-                auto_charge.rearm()
-        await server.broadcast({"Message": evt})
-
-    stop = asyncio.Event()
-
-    async def on_quit() -> None:
-        log.info("quit requested")
-        stop.set()
-
-    sources = [KeyboardSource(on_event, on_quit=on_quit)]
-    if args.auto_charge_temp is not None:
-        auto_charge = AutoChargeSource(state, args.auto_charge_temp, on_event)
-        sources.append(auto_charge)
-    if args.control_file:
-        sources.append(FileSource(args.control_file, on_event))
-
     await server.start(args.host, args.port)
 
     if args.sim:
@@ -198,22 +159,14 @@ async def _run(args: argparse.Namespace) -> None:
             "use --sim to test the pipeline without BLE"
         )
         await server.stop()
-        for src in sources:
-            await src.stop()
         return
-    for src in sources:
-        await src.start()
 
+    recorder.start()
     recorder_task = asyncio.create_task(recorder.run(state))
     try:
-        await stop.wait()
+        await asyncio.Event().wait()
     finally:
         recorder_task.cancel()
         recorder.close()
-        for src in sources:
-            try:
-                await src.stop()
-            except Exception:
-                log.exception("error stopping %s", type(src).__name__)
         await data_source.stop()
         await server.stop()
