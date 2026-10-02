@@ -30,9 +30,22 @@ class H5055Scanner:
     """Continuous bleak scanner: one ``start()`` for the whole session.
 
     Advertisements are filtered by exact MAC (``--mac``) or the Govee prefix
-    (default ``a4:c1:38``) plus the 0xEC88 manufacturer key, decoded, and
-    merged into the shared state. A watchdog warns when no advertisement has
-    arrived for ``watchdog`` seconds and, if enabled, restarts the scan.
+    (default ``a4:c1:38``) plus the manufacturer key, decoded, and merged into
+    the shared state.
+
+    Measured device behaviour (see the notes in ``docs``/memory): the H5055
+    emits short *pairs* of advertisements at ~1 s cadence in aggregate, but the
+    ``payload_index`` rotates over three probe pairs, so the pair carrying a
+    given channel is only seen every few seconds. Windows also delivers many
+    byte-identical duplicates. Two consequences shape this class:
+
+    * a single long-lived scanner captures more than one that is restarted --
+      re-arming the radio drops packets -- so restarts are a last-resort
+      recovery only, not a steady-state strategy;
+    * because each ``payload_index`` reports only two of the six channels, a
+      channel can go stale for tens of seconds while traffic still flows, so
+      the watchdog tracks the age of the *probe readings* separately from the
+      age of the last advertisement.
     """
 
     def __init__(
@@ -43,6 +56,8 @@ class H5055Scanner:
         mac_prefix: str = "a4:c1:38",
         scan_mode: str = "active",
         watchdog: float = 30.0,
+        reading_watchdog: float = 60.0,
+        dedupe_window: float = 0.25,
         restart_on_watchdog: bool = False,
     ) -> None:
         self.state = state
@@ -50,10 +65,20 @@ class H5055Scanner:
         self.mac_prefix = mac_prefix
         self.scan_mode = scan_mode
         self.watchdog = watchdog
+        self.reading_watchdog = reading_watchdog
+        self.dedupe_window = dedupe_window
         self.restart_on_watchdog = restart_on_watchdog
         self._scanner: object | None = None
         self._watchdog_task: asyncio.Task | None = None
         self._misses = 0
+        self._last_sig: tuple | None = None
+        self._last_sig_at = 0.0
+        self._duplicates = 0
+        self._started_at = time.monotonic()
+        # monotonic time of the last advertisement that carried a real probe
+        # reading, and the readings themselves, for change detection.
+        self.last_reading_at: float | None = None
+        self._last_readings: dict[int, float] = {}
 
     def _matches(self, address: str) -> bool:
         addr = address.lower()
@@ -77,14 +102,60 @@ class H5055Scanner:
             return
         if payload is None:
             return
-        self.state.update(payload, advertisement.rssi, time.monotonic())
+
+        now = time.monotonic()
+
+        # Windows (and the device's ADV/SCAN_RSP pair) deliver byte-identical
+        # frames within milliseconds of each other. Recording them twice
+        # inflates sample counts and makes an "update rate" look better than it
+        # is, so collapse repeats inside ``dedupe_window``. A genuine repeat of
+        # the same temperature later than the window is still recorded, which
+        # keeps long stable plateaus visible in the logs.
+        sig = (
+            payload.payload_index,
+            payload.channel_a.value,
+            payload.channel_b.value,
+            payload.battery,
+        )
+        if (
+            self.dedupe_window > 0
+            and sig == self._last_sig
+            and now - self._last_sig_at < self.dedupe_window
+        ):
+            self._duplicates += 1
+            # Still refresh liveness so the "any traffic" watchdog is accurate.
+            self.state.last_seen = now
+            self.state.rssi = advertisement.rssi
+            return
+        self._last_sig = sig
+        self._last_sig_at = now
+
+        # Track probe-reading freshness independently of general traffic: a
+        # channel can be absent for a long time while other probe pairs (which
+        # this device reports as 0xFFFF) keep arriving.
+        readings = {
+            ch: r.value
+            for ch, r in (
+                (payload.base_channel, payload.channel_a),
+                (payload.base_channel + 1, payload.channel_b),
+            )
+            if r.value is not None
+        }
+        if readings:
+            self.last_reading_at = now
+            self._last_readings = readings
+
+        self.state.update(payload, advertisement.rssi, now)
 
     async def start(self) -> None:
         log.info(
-            "starting H5055 scan (mac=%s scan_mode=%s watchdog=%.0fs)",
+            "starting H5055 scan (mac=%s scan_mode=%s watchdog=%.0fs "
+            "reading_watchdog=%.0fs dedupe=%.2fs)",
             self.mac or self.mac_prefix + "*",
             self.scan_mode,
             self.watchdog,
+            self.reading_watchdog,
+            self.dedupe_window,
         )
         from bleak import BleakScanner  # lazy: only needed for real BLE
 
@@ -111,8 +182,12 @@ class H5055Scanner:
     async def _watchdog_loop(self) -> None:
         while True:
             await asyncio.sleep(self.watchdog)
+            now = time.monotonic()
+
+            # 1) Is the device audible at all? This catches a dead adapter or a
+            #    device that went out of range.
             last = self.state.last_seen
-            age = time.monotonic() - last if last is not None else self.watchdog + 1
+            age = now - last if last is not None else self.watchdog + 1
             if age > self.watchdog:
                 self._misses += 1
                 log.warning(
@@ -122,6 +197,28 @@ class H5055Scanner:
                     await self.restart()
             else:
                 self._misses = 0
+
+            # 2) Are the *probes* still reporting? Because payload_index rotates
+            #    over three pairs, traffic keeps flowing while a given channel
+            #    is silent, so this is a separate and usually more informative
+            #    signal than the liveness check above.
+            if self.reading_watchdog > 0:
+                seen = self.last_reading_at
+                if seen is None:
+                    log.warning(
+                        "no probe readings yet (%.0fs since start); "
+                        "check that a probe is plugged in",
+                        now - self._started_at,
+                    )
+                elif now - seen > self.reading_watchdog:
+                    log.warning(
+                        "no probe readings for %.0fs (last: %s)",
+                        now - seen,
+                        ", ".join(
+                            f"ch{c}={v}" for c, v in sorted(self._last_readings.items())
+                        )
+                        or "none",
+                    )
 
 
 async def list_h5055(

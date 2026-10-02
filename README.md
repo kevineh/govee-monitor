@@ -110,22 +110,43 @@ uv run python -m govee_monitor --sim --bt-channel 4 --et-channel 6
 
 ### Usage notes
 
-- **Refresh rate (important)**: the H5055 delivers data by broadcast when
-  idle, measured at roughly **one advertisement every 15–30 seconds**
-  (broadcast is the official data channel — Home Assistant's govee_ble and
-  Theengs both parse it from broadcasts only). So temperatures update in
-  15–30 s steps, not as a smooth continuous curve.
-  The Govee app is near-real-time (<5s) because it opens a **GATT
-  connection** that exclusively uses the device (the device stops
-  broadcasting while connected) and streams via a private notify protocol,
-  which has no public reverse-engineering yet. This tool therefore uses
-  broadcast mode, and **the refresh ceiling is the device's own broadcast
-  rate**.
-  Lower Artisan's sampling interval (`Config » Sampling` → 1s) so it pulls a
-  new value right after each broadcast, but it cannot be faster than the
-  broadcasts themselves.
+- **Refresh rate (important)**: the H5055 throttles its advertising according
+  to how fast the temperature is *changing*. Measured in one continuous run
+  where a probe was warmed by hand and then left to cool:
+
+  | phase | adverts / 30 s | probe readings seen |
+  |---|---|---|
+  | temperature moving | **30** (≈1 Hz) | 4 different values |
+  | temperature settled | **2** | 1 value, then none |
+
+  That is a ~15× swing. So **while a roast is climbing you get roughly one
+  advertisement per second and a new probe value about every 6 s** — the period
+  that matters — and updates correctly slow to tens of seconds once the
+  temperature is stable.
+  Two further details: the payload rotates over three probe pairs, so each
+  advertisement carries only **two of the six** channels; and the measurement is
+  quantised to 1 °C and re-sent several times, so repeated values are normal.
+  Lower Artisan's sampling interval (`Config » Sampling` → 1s) so it picks up a
+  new value soon after each broadcast; it cannot be faster than the broadcasts.
+- **Scanning**: `--scan-mode active` (the default) reliably catches more
+  bursts than `passive`. Keep one long-lived scan — measured capture rate is
+  *worse* if the scanner is restarted periodically, so
+  `--restart-on-watchdog` is a last-resort recovery only.
+  Because a stable probe legitimately goes quiet, `--reading-watchdog`
+  (default 60s) warns about *probe* staleness separately from `--watchdog`
+  (default 30s), which only reports whether the device is audible at all. A
+  reading warning during a genuinely stable period is expected and harmless.
+  `--dedupe-window` (default 0.25s) collapses the many byte-identical
+  duplicates Windows delivers. Note that short scan windows are misleading:
+  a 60 s window once caught only 2 adverts where a 180 s window caught 69.
 - **Temperature values**: new firmware (mfg `0x0070`) already divides by 100
   internally, so you read real °C and don't need `--temp-divisor`.
+- **Why not the GATT connection?** The app's near-real-time path was
+  reverse-engineered (service `494e5445-…4857`, poll command `0x24`, plus an
+  AES-GCM session handshake). It is **not usable from a third-party client**:
+  the handshake requires a per-device key that the app receives from the Govee
+  account/cloud, and the device ignores commands without it. The broadcast path
+  above is the supported approach.
 
 ## Artisan configuration
 
@@ -169,9 +190,11 @@ to control plotting. No event linkage.
 | `--out` | ./logs | Output directory for log files |
 | `--log-format` | jsonl | `jsonl` \| `csv` \| `channels` (channels = 6-column CSV) |
 | `--temp-divisor` | 1 | Divide raw readings by this (see "Range cross-check") |
-| `--scan-mode` | active | `active` \| `passive` |
+| `--scan-mode` | active | `active` \| `passive` (active catches more bursts) |
 | `--watchdog` | 30s | Warn after this many seconds without advertisements (0=off) |
-| `--restart-on-watchdog` | off | Restart the scan after 3 missed watchdog intervals |
+| `--reading-watchdog` | 60s | Warn after this many seconds without *probe readings* (0=off) |
+| `--dedupe-window` | 0.25s | Collapse byte-identical advertisements within this window (0=off) |
+| `--restart-on-watchdog` | off | Restart the scan after 3 missed watchdog intervals (last resort) |
 | `--sim` | off | Synthetic payloads, no BLE needed |
 | `--list` | off | Scan ~5s and list discovered H5055 devices |
 | `-v` | - | Debug logging |
@@ -276,7 +299,12 @@ JSONL/CSV content, and sim-driven end-to-end ramp logs.
   to decoding, but a firmware variant that inserts bytes would shift the
   offsets → mitigated by defensive validation and logging the raw hex on
   decode failure.
-- **Broadcast cadence**: new firmware measured at roughly one broadcast every
-  15–30 s idle, with the 3 payload variants rotating even more sparsely;
-  refresh is limited by this (see "Usage notes"). A future GATT real-time
-  protocol could break past it.
+- **Broadcast cadence**: the device throttles advertising by temperature change —
+  ~1 Hz while the reading is moving, near-silent once it settles (measured 30
+  vs 2 adverts per 30 s in one run). It also rotates the payload over 3 probe
+  pairs, so each advertisement carries only 2 of the 6 channels and a given
+  probe is re-measured about every 6 s while changing. Idle rate is variable,
+  so use measurement windows of at least ~2 minutes (see "Usage notes").
+  The GATT real-time protocol was reverse-engineered but needs a cloud-issued
+  per-device key, so it cannot be used here (see "Why not the GATT
+  connection?").

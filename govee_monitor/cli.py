@@ -67,7 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="divide raw readings by this (use 10 if firmware reports 0.1 deg)",
     )
 
-    p.add_argument("--scan-mode", choices=["active", "passive"], default="active")
+    p.add_argument(
+        "--scan-mode",
+        choices=["active", "passive"],
+        default="active",
+        help="active scan solicits SCAN_RSP and catches more bursts (default active)",
+    )
     p.add_argument(
         "--watchdog",
         type=float,
@@ -75,9 +80,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds without advertisements before warning (default 30, 0=off)",
     )
     p.add_argument(
+        "--reading-watchdog",
+        type=float,
+        default=60.0,
+        help=(
+            "seconds without *probe readings* before warning (default 60, 0=off). "
+            "Separate from --watchdog: the payload rotates over three probe pairs, "
+            "so a channel can be silent while the device is still advertising."
+        ),
+    )
+    p.add_argument(
+        "--dedupe-window",
+        type=float,
+        default=0.25,
+        help=(
+            "collapse byte-identical advertisements seen within this many seconds "
+            "(default 0.25, 0=off). Windows delivers many duplicates."
+        ),
+    )
+    p.add_argument(
         "--restart-on-watchdog",
         action="store_true",
-        help="restart the scan after 3 missed watchdog intervals",
+        help=(
+            "restart the scan after 3 missed watchdog intervals. Last resort only: "
+            "measured capture rate is worse with periodic restarts."
+        ),
     )
 
     p.add_argument("--sim", action="store_true", help="synthetic payloads, no BLE needed")
@@ -147,6 +174,8 @@ async def _run(args: argparse.Namespace) -> None:
             mac=args.mac,
             scan_mode=args.scan_mode,
             watchdog=args.watchdog,
+            reading_watchdog=args.reading_watchdog,
+            dedupe_window=args.dedupe_window,
             restart_on_watchdog=args.restart_on_watchdog,
         )
 
